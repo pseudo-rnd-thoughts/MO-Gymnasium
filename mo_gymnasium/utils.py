@@ -1,18 +1,24 @@
 """Utilities function such as wrappers."""
+from __future__ import annotations
 
-import time
-from copy import deepcopy
-from typing import Iterator, Tuple, TypeVar
+from typing import Iterator, Callable, Any
 
 import gymnasium as gym
 import numpy as np
+from gymnasium.core import ActType, ObsType
 from gymnasium.vector import SyncVectorEnv
-from gymnasium.wrappers.normalize import RunningMeanStd
-from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.wrappers.utils import RunningMeanStd
+from gymnasium.wrappers import RecordEpisodeStatistics
 
-
-ObsType = TypeVar("ObsType")
-ActType = TypeVar("ActType")
+__all__ = [
+    "make",
+    "LinearReward",
+    "MONormalizeReward",
+    "MOClipReward",
+    "MORecordEpisodeStatistics",
+    "MOMaxAndSkipObservation",
+    "MOSyncVectorEnv",
+]
 
 
 def make(env_name: str, disable_env_checker: bool = True, **kwargs) -> gym.Env:
@@ -24,7 +30,6 @@ def make(env_name: str, disable_env_checker: bool = True, **kwargs) -> gym.Env:
         **kwargs: forwards arguments to the environment constructor
     Returns: a newly created environment.
     """
-    """Disable env checker, as it requires the reward to be a scalar."""
     return gym.make(env_name, disable_env_checker=disable_env_checker, **kwargs)
 
 
@@ -40,8 +45,10 @@ class LinearReward(gym.Wrapper, gym.utils.RecordConstructorArgs):
         """
         gym.utils.RecordConstructorArgs.__init__(self, weight=weight)
         gym.Wrapper.__init__(self, env)
+
         if weight is None:
             weight = np.ones(shape=env.unwrapped.reward_space.shape)
+        self.w = np.zeros(())
         self.set_weight(weight)
 
     def set_weight(self, weight: np.ndarray):
@@ -54,7 +61,7 @@ class LinearReward(gym.Wrapper, gym.utils.RecordConstructorArgs):
         assert weight.shape == self.env.unwrapped.reward_space.shape, "Reward weight has different shape than reward vector."
         self.w = weight
 
-    def step(self, action: ActType) -> Tuple[ObsType, float, bool, bool, dict]:
+    def step(self, action: ActType) -> tuple[ObsType, float, bool, bool, dict]:
         """Steps in the environment.
 
         Args:
@@ -83,11 +90,12 @@ class MONormalizeReward(gym.Wrapper, gym.utils.RecordConstructorArgs):
         """
         gym.utils.RecordConstructorArgs.__init__(self, idx=idx, gamma=gamma, epsilon=epsilon)
         gym.Wrapper.__init__(self, env)
+
         self.idx = idx
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.is_vector_env = getattr(env, "is_vector_env", False)
+
         self.return_rms = RunningMeanStd(shape=())
         self.returns = np.zeros(self.num_envs)
+
         self.gamma = gamma
         self.epsilon = epsilon
 
@@ -153,32 +161,6 @@ class MOClipReward(gym.RewardWrapper, gym.utils.RecordConstructorArgs):
         return reward
 
 
-class MOSyncVectorEnv(SyncVectorEnv):
-    """Vectorized environment that serially runs multiple environments."""
-
-    def __init__(
-        self,
-        env_fns: Iterator[callable],
-        copy: bool = True,
-    ):
-        """Vectorized environment that serially runs multiple environments.
-
-        Args:
-            env_fns: env constructors
-            copy: If ``True``, then the :meth:`reset` and :meth:`step` methods return a copy of the observations.
-        """
-        SyncVectorEnv.__init__(self, env_fns, copy=copy)
-        # Just overrides the rewards memory to add the number of objectives
-        self.reward_space = self.envs[0].unwrapped.reward_space
-        self._rewards = np.zeros(
-            (
-                self.num_envs,
-                self.reward_space.shape[0],
-            ),
-            dtype=np.float64,
-        )
-
-
 class MORecordEpisodeStatistics(RecordEpisodeStatistics, gym.utils.RecordConstructorArgs):
     """This wrapper will keep track of cumulative rewards and episode lengths.
 
@@ -187,126 +169,34 @@ class MORecordEpisodeStatistics(RecordEpisodeStatistics, gym.utils.RecordConstru
         >>> info = {
         ...     "episode": {
         ...         "r": "<cumulative reward (array)>",
-        ...         "dr": "<discounted reward (array)>",
         ...         "l": "<episode length (scalar)>", # contrary to Gymnasium, these are not a numpy array
         ...         "t": "<elapsed time since beginning of episode (scalar)>"
         ...     },
         ... }
-
-    For a vectorized environments the output will be in the form of (be careful to first wrap the env into vector before applying MORewordStatistics)::
-
-        >>> infos = {
-        ...     "final_observation": "<array of length num-envs>",
-        ...     "_final_observation": "<boolean array of length num-envs>",
-        ...     "final_info": "<array of length num-envs>",
-        ...     "_final_info": "<boolean array of length num-envs>",
-        ...     "episode": {
-        ...         "r": "<array of cumulative reward (2d array, shape (num_envs, dim_reward))>",
-        ...         "dr": "<array of discounted reward (2d array, shape (num_envs, dim_reward))>",
-        ...         "l": "<array of episode length (array)>",
-        ...         "t": "<array of elapsed time since beginning of episode (array)>"
-        ...     },
-        ...     "_episode": "<boolean array of length num-envs>"
-        ... }
     """
 
-    def __init__(self, env: gym.Env, gamma: float = 1.0, deque_size: int = 100):
+    def __init__(self, env: gym.Env, buffer_length: int = 100):
         """This wrapper will keep track of cumulative rewards and episode lengths.
 
         Args:
             env (Env): The environment to apply the wrapper
-            gamma (float): Discounting factor
-            deque_size: The size of the buffers :attr:`return_queue` and :attr:`length_queue`
+            buffer_length: The size of the buffers :attr:`return_queue` and :attr:`length_queue`
         """
-        gym.utils.RecordConstructorArgs.__init__(self, gamma=gamma, deque_size=deque_size)
-        RecordEpisodeStatistics.__init__(self, env, deque_size=deque_size)
-        # CHANGE: Here we just override the standard implementation to extend to MO
-        # We also take care of the case where the env is vectorized
-        self.reward_dim = self.env.unwrapped.reward_space.shape[0]
-        if self.is_vector_env:
-            self.rewards_shape = (self.num_envs, self.reward_dim)
-        else:
-            self.rewards_shape = (self.reward_dim,)
-        self.gamma = gamma
+        gym.utils.RecordConstructorArgs.__init__(self, buffer_length=buffer_length)
+        RecordEpisodeStatistics.__init__(self, env, buffer_length=buffer_length)
 
-    def reset(self, **kwargs):
+        self.reward_dim = self.env.get_wrapper_attr("reward_space").shape[0]
+
+    def reset(
+        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+    ) -> tuple[ObsType, dict[str, Any]]:
         """Resets the environment using kwargs and resets the episode returns and lengths."""
-        obs, info = super().reset(**kwargs)
+        obs, info = super().reset(seed=seed, options=options)
 
         # CHANGE: Here we just override the standard implementation to extend to MO
-        self.episode_returns = np.zeros(self.rewards_shape, dtype=np.float32)
-        self.disc_episode_returns = np.zeros(self.rewards_shape, dtype=np.float32)
+        self.episode_returns = np.zeros(self.reward_dim, dtype=np.float32)
 
         return obs, info
-
-    def step(self, action):
-        """Steps through the environment, recording the episode statistics."""
-        # This is very close the code from the RecordEpisodeStatistics wrapper from gym.
-        (
-            observations,
-            rewards,
-            terminations,
-            truncations,
-            infos,
-        ) = self.env.step(action)
-        assert isinstance(
-            infos, dict
-        ), f"`info` dtype is {type(infos)} while supported dtype is `dict`. This may be due to usage of other wrappers in the wrong order."
-        self.episode_returns += rewards
-        self.episode_lengths += 1
-
-        # CHANGE: The discounted returns are also computed here
-        self.disc_episode_returns += rewards * np.repeat(self.gamma**self.episode_lengths, self.reward_dim).reshape(
-            self.episode_returns.shape
-        )
-
-        dones = np.logical_or(terminations, truncations)
-        num_dones = np.sum(dones)
-        if num_dones:
-            if "episode" in infos or "_episode" in infos:
-                raise ValueError("Attempted to add episode stats when they already exist")
-            else:
-                episode_return = np.zeros(self.rewards_shape, dtype=np.float32)
-                disc_episode_return = np.zeros(self.rewards_shape, dtype=np.float32)
-                if self.is_vector_env:
-                    for i in range(self.num_envs):
-                        if dones[i]:
-                            # CHANGE: Makes a deepcopy to avoid subsequent mutations
-                            episode_return[i] = deepcopy(self.episode_returns[i])
-                            disc_episode_return[i] = deepcopy(self.disc_episode_returns[i])
-                else:
-                    episode_return = deepcopy(self.episode_returns)
-                    disc_episode_return = deepcopy(self.disc_episode_returns)
-
-                length_eps = np.where(dones, self.episode_lengths, 0)
-                time_eps = np.where(
-                    dones,
-                    np.round(time.perf_counter() - self.episode_start_times, 6),
-                    0.0,
-                )
-
-                infos["episode"] = {
-                    "r": episode_return,
-                    "dr": disc_episode_return,
-                    "l": length_eps[0] if not self.is_vector_env else length_eps,
-                    "t": time_eps[0] if not self.is_vector_env else time_eps,
-                }
-                if self.is_vector_env:
-                    infos["_episode"] = np.where(dones, True, False)
-            self.return_queue.extend(self.episode_returns[dones])
-            self.length_queue.extend(self.episode_lengths[dones])
-            self.episode_count += num_dones
-            self.episode_lengths[dones] = 0
-            self.episode_returns[dones] = np.zeros(self.reward_dim, dtype=np.float32)
-            self.disc_episode_returns[dones] = np.zeros(self.reward_dim, dtype=np.float32)
-            self.episode_start_times[dones] = time.perf_counter()
-        return (
-            observations,
-            rewards,
-            terminations,
-            truncations,
-            infos,
-        )
 
 
 class MOMaxAndSkipObservation(gym.Wrapper):
@@ -360,3 +250,29 @@ class MOMaxAndSkipObservation(gym.Wrapper):
         max_frame = self._obs_buffer.max(axis=0)
 
         return max_frame, total_reward, terminated, truncated, info
+
+
+class MOSyncVectorEnv(SyncVectorEnv):
+    """Vectorized environment that serially runs multiple environments."""
+
+    def __init__(
+        self,
+        env_fns: Iterator[Callable[[], gym.Env]],
+        copy: bool = True,
+    ):
+        """Vectorized environment that serially runs multiple environments.
+
+        Args:
+            env_fns: env constructors
+            copy: If ``True``, then the :meth:`reset` and :meth:`step` methods return a copy of the observations.
+        """
+        SyncVectorEnv.__init__(self, env_fns, copy=copy)
+        # Just overrides the rewards memory to add the number of objectives
+        self.reward_space = self.envs[0].unwrapped.reward_space
+        self._rewards = np.zeros(
+            (
+                self.num_envs,
+                self.reward_space.shape[0],
+            ),
+            dtype=np.float64,
+        )
