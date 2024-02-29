@@ -234,7 +234,7 @@ class MOMaxAndSkipObservation(gym.Wrapper):
         Returns:
             Max of the last two observations, reward, terminated, truncated, and info from the environment
         """
-        total_reward = np.zeros(self.env.unwrapped.reward_dim, dtype=np.float32)
+        total_reward = np.zeros(self.env.get_wrapper_attr("reward_dim"), dtype=np.float32)
         terminated = truncated = False
         info = {}
         for i in range(self._skip):
@@ -268,7 +268,7 @@ class MOSyncVectorEnv(SyncVectorEnv):
         """
         SyncVectorEnv.__init__(self, env_fns, copy=copy)
         # Just overrides the rewards memory to add the number of objectives
-        self.reward_space = self.envs[0].unwrapped.reward_space
+        self.reward_space = self.envs[0].get_wrapper_attr("reward_space")
         self._rewards = np.zeros(
             (
                 self.num_envs,
